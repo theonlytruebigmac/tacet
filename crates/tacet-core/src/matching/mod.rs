@@ -55,6 +55,11 @@ pub struct MatchResult {
 /// Returns `None` if no alignment crosses `config.match_threshold` or the
 /// resulting span is shorter than `config.min_segment_seconds`.
 ///
+/// Confidence is the fraction of *reference* hashes that voted at the
+/// dominant alignment. This is independent of how long the query scan window
+/// is — matching a 90 s intro inside a 10 min window can still hit ~100 %
+/// because the denominator is the intro-only reference, not the whole window.
+///
 /// The matched span is the *longest contiguous run* of votes at the dominant
 /// delta (within `MAX_GAP_FRAMES`). Taking the global min/max would let one
 /// stray late vote stretch the reported intro by tens of seconds.
@@ -67,25 +72,30 @@ pub fn match_against_reference(
         return None;
     }
 
+    // Per delta: which reference hashes voted (set; each ref hash counts once)
+    // and which query frames voted (vec; used for longest-run span).
+    let mut delta_to_ref_hashes: HashMap<i32, std::collections::HashSet<u32>> = HashMap::new();
     let mut delta_to_frames: HashMap<i32, Vec<u32>> = HashMap::new();
 
     for h in &query.hashes {
         if let Some(&ref_frame) = reference.hash_to_frame.get(&h.hash) {
             let delta = h.frame as i32 - ref_frame as i32;
+            delta_to_ref_hashes.entry(delta).or_default().insert(h.hash);
             delta_to_frames.entry(delta).or_default().push(h.frame);
         }
     }
 
-    let (best_delta, mut best_frames) = delta_to_frames
-        .into_iter()
-        .max_by_key(|(_, v)| v.len())?;
+    let (best_delta, ref_hashes_hit) = delta_to_ref_hashes
+        .iter()
+        .max_by_key(|(_, set)| set.len())
+        .map(|(d, set)| (*d, set.len()))?;
 
-    let support = best_frames.len();
-    let confidence = support as f64 / query.hashes.len() as f64;
+    let confidence = ref_hashes_hit as f64 / reference.len() as f64;
     if confidence < config.match_threshold {
         return None;
     }
 
+    let mut best_frames = delta_to_frames.remove(&best_delta)?;
     best_frames.sort_unstable();
     let (run_start, run_end) = longest_run(&best_frames, MAX_GAP_FRAMES);
     let start = query.frame_to_seconds(run_start);
@@ -101,6 +111,27 @@ pub fn match_against_reference(
         confidence: confidence.min(1.0),
         offset_frames: best_delta,
     })
+}
+
+/// Match a query against several references and return the best match, if any.
+///
+/// Used when a season has multiple reference fingerprints — e.g., an anime with
+/// an OP/ED swap mid-season produces two clusters of episodes with different
+/// intro audio. Each cluster gets its own reference; per-episode matching tries
+/// all references and keeps the one with the highest confidence.
+pub fn match_against_references(
+    references: &[ReferenceFingerprint],
+    query: &Fingerprint,
+    config: &Config,
+) -> Option<MatchResult> {
+    references
+        .iter()
+        .filter_map(|r| match_against_reference(r, query, config))
+        .max_by(|a, b| {
+            a.confidence
+                .partial_cmp(&b.confidence)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
 }
 
 /// Max frame gap (≈1.3s at 16 kHz/2048 hop) considered "still inside the run".

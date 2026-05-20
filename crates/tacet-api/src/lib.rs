@@ -17,9 +17,9 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tower_http::trace::TraceLayer;
 
-use crate::detection;
-use crate::storage::{FingerprintKind, Store};
-use crate::{Config, SegmentMarkers};
+use tacet::detection;
+use tacet::storage::{FingerprintKind, Store};
+use tacet::{Config, SegmentMarkers};
 
 pub struct AppState {
     pub store: Store,
@@ -74,20 +74,20 @@ async fn detect_episode(
     State(state): State<SharedState>,
     Json(req): Json<DetectRequest>,
 ) -> Result<Json<DetectResponse>, ApiError> {
-    let intro_ref = state
+    let intro_refs = state
         .store
-        .load_reference(&req.series, req.season, FingerprintKind::Intro)?;
-    let credits_ref = state
+        .load_references(&req.series, req.season, FingerprintKind::Intro)?;
+    let credits_refs = state
         .store
-        .load_reference(&req.series, req.season, FingerprintKind::Credits)?;
+        .load_references(&req.series, req.season, FingerprintKind::Credits)?;
 
-    let reference_available = intro_ref.is_some() || credits_ref.is_some();
+    let reference_available = !intro_refs.is_empty() || !credits_refs.is_empty();
     let markers = if reference_available {
         detection::detect_single_episode(
             &req.file_path,
             &req.episode_id,
-            intro_ref.as_ref(),
-            credits_ref.as_ref(),
+            &intro_refs,
+            &credits_refs,
             &state.config,
         )?
     } else {

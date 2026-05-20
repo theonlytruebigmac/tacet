@@ -1,0 +1,26 @@
+[package]
+name = "tacet-api"
+description = "HTTP service wrapper for tacet — exposes scan + detect + markers endpoints"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "tacet_api"
+path = "src/lib.rs"
+
+[dependencies]
+# tacet-core is required with `store` because the API persists references
+# and markers; callers wanting a different storage layer can fork this crate.
+tacet-core = { workspace = true, features = ["store"] }
+
+axum = "0.7"
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net"] }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+tracing = { workspace = true }
+anyhow = { workspace = true }

@@ -2,10 +2,13 @@
 //!
 //! Layout under `data_dir`:
 //! - `tacet.db`           — SQLite database of detected segment markers
-//! - `fp/<series>/s<NN>/e<NN>.intro.bin`    — per-episode intro fingerprint (bincode)
-//! - `fp/<series>/s<NN>/e<NN>.credits.bin`  — per-episode credits fingerprint (bincode)
-//! - `fp/<series>/s<NN>/intro.ref.bin`      — bootstrapped intro reference
-//! - `fp/<series>/s<NN>/credits.ref.bin`    — bootstrapped credits reference
+//! - `fp/<series>/s<NN>/e<NN>.intro.bin`     — per-episode intro fingerprint (bincode)
+//! - `fp/<series>/s<NN>/e<NN>.credits.bin`   — per-episode credits fingerprint (bincode)
+//! - `fp/<series>/s<NN>/intro.ref.<N>.bin`   — bootstrapped intro reference, cluster N
+//! - `fp/<series>/s<NN>/credits.ref.<N>.bin` — bootstrapped credits reference, cluster N
+//!
+//! A season may have multiple references per kind — e.g. an anime that swaps
+//! its OP mid-season produces two intro clusters, each with its own reference.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -190,25 +193,60 @@ impl Store {
         read_bincode(&path)
     }
 
-    pub fn save_reference(
+    /// Persist the full set of references for a (series, season, kind) tuple,
+    /// overwriting any previous set. Cluster indices in the filename match the
+    /// position in `references`.
+    pub fn save_references(
         &self,
         series_id: &str,
         season: u32,
         kind: FingerprintKind,
-        reference: &ReferenceFingerprint,
+        references: &[ReferenceFingerprint],
     ) -> Result<()> {
-        let path = self.reference_path(series_id, season, kind);
-        write_bincode(&path, reference)
+        let dir = self.season_dir(series_id, season);
+        fs::create_dir_all(&dir)?;
+
+        // Sweep any stale cluster files from a previous run with more clusters
+        // than this one, so reads don't pick up obsolete data.
+        let prefix = format!("{}.ref.", kind.suffix());
+        if let Ok(entries) = fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                if let Some(name) = entry.file_name().to_str() {
+                    if name.starts_with(&prefix) && name.ends_with(".bin") {
+                        let _ = fs::remove_file(entry.path());
+                    }
+                }
+            }
+        }
+
+        for (idx, reference) in references.iter().enumerate() {
+            let path = self.reference_path(series_id, season, kind, idx);
+            write_bincode(&path, reference)?;
+        }
+        Ok(())
     }
 
-    pub fn load_reference(
+    /// Load all references for a (series, season, kind) tuple. Returns an
+    /// empty Vec when none exist (i.e. the season has not been bootstrapped).
+    pub fn load_references(
         &self,
         series_id: &str,
         season: u32,
         kind: FingerprintKind,
-    ) -> Result<Option<ReferenceFingerprint>> {
-        let path = self.reference_path(series_id, season, kind);
-        read_bincode(&path)
+    ) -> Result<Vec<ReferenceFingerprint>> {
+        let mut out = Vec::new();
+        let mut idx = 0usize;
+        loop {
+            let path = self.reference_path(series_id, season, kind, idx);
+            match read_bincode::<ReferenceFingerprint>(&path)? {
+                Some(r) => {
+                    out.push(r);
+                    idx += 1;
+                }
+                None => break,
+            }
+        }
+        Ok(out)
     }
 
     fn season_dir(&self, series_id: &str, season: u32) -> PathBuf {
@@ -228,20 +266,28 @@ impl Store {
             .join(format!("e{:02}.{}.bin", episode_index, kind.suffix()))
     }
 
-    fn reference_path(&self, series_id: &str, season: u32, kind: FingerprintKind) -> PathBuf {
+    fn reference_path(
+        &self,
+        series_id: &str,
+        season: u32,
+        kind: FingerprintKind,
+        cluster_idx: usize,
+    ) -> PathBuf {
         self.season_dir(series_id, season)
-            .join(format!("{}.ref.bin", kind.suffix()))
+            .join(format!("{}.ref.{}.bin", kind.suffix(), cluster_idx))
     }
 }
 
-/// Which window a fingerprint covers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FingerprintKind {
-    Intro,
-    Credits,
+// `FingerprintKind` moved to `crate::fingerprint::FingerprintKind` so
+// detection paths compile when the `store` feature is disabled. Re-exported
+// from this module for back-compat with the v0.1 storage API.
+pub use crate::fingerprint::FingerprintKind;
+
+trait FingerprintKindExt {
+    fn suffix(self) -> &'static str;
 }
 
-impl FingerprintKind {
+impl FingerprintKindExt for FingerprintKind {
     fn suffix(self) -> &'static str {
         match self {
             FingerprintKind::Intro => "intro",
@@ -256,6 +302,10 @@ fn build_segment(start: Option<f64>, end: Option<f64>, conf: Option<f64>) -> Opt
             start: s,
             end: e,
             confidence: c,
+            // v0.1 didn't persist the source — assume fingerprint match on
+            // load. Forward-compat: add a `source` column in a follow-up
+            // migration when consumers actually need to round-trip it.
+            source: crate::SegmentSource::AudioFingerprint,
         }),
         _ => None,
     }
@@ -321,11 +371,13 @@ mod tests {
                 start: 5.0,
                 end: 65.0,
                 confidence: 0.94,
+                source: crate::SegmentSource::AudioFingerprint,
             }),
             credits: Some(Segment {
                 start: 2800.0,
                 end: 2840.0,
                 confidence: 0.87,
+                source: crate::SegmentSource::AudioFingerprint,
             }),
         };
         store.save_markers(&m).unwrap();

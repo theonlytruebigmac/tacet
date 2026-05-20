@@ -1502,13 +1502,43 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0bf256ce5efdfa370213c1dabab5935a12e49f2c58d15e9eac2870d3b4f27263"
 
 [[package]]
-name = "tacet"
-version = "0.1.0"
+name = "tacet-api"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "axum",
- "bincode",
+ "serde",
+ "serde_json",
+ "tacet-core",
+ "tokio",
+ "tower-http",
+ "tracing",
+]
+
+[[package]]
+name = "tacet-cli"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "axum",
  "clap",
+ "rayon",
+ "serde",
+ "serde_json",
+ "shellexpand",
+ "tacet-api",
+ "tacet-core",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "tacet-core"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "bincode",
  "criterion",
  "num-complex",
  "rayon",
@@ -1517,14 +1547,11 @@ dependencies = [
  "rustfft",
  "serde",
  "serde_json",
- "shellexpand",
  "symphonia",
+ "tacet-core",
  "tempfile",
  "thiserror 1.0.69",
- "tokio",
- "tower-http",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

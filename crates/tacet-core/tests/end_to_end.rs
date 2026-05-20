@@ -102,7 +102,7 @@ fn detect_and_persist_writes_markers_and_references() {
 
     let reference = matching::build_reference(&fps.iter().collect::<Vec<_>>(), &config).unwrap();
     store
-        .save_reference("synthetic", 1, FingerprintKind::Intro, &reference)
+        .save_references("synthetic", 1, FingerprintKind::Intro, std::slice::from_ref(&reference))
         .unwrap();
     for (i, fp) in fps.iter().enumerate() {
         store
@@ -110,11 +110,11 @@ fn detect_and_persist_writes_markers_and_references() {
             .unwrap();
     }
 
-    let loaded_ref = store
-        .load_reference("synthetic", 1, FingerprintKind::Intro)
-        .unwrap()
-        .expect("reference should be present");
-    assert_eq!(loaded_ref.len(), reference.len());
+    let loaded_refs = store
+        .load_references("synthetic", 1, FingerprintKind::Intro)
+        .unwrap();
+    assert_eq!(loaded_refs.len(), 1);
+    assert_eq!(loaded_refs[0].len(), reference.len());
 
     let loaded_fp = store
         .load_episode_fingerprint("synthetic", 1, 1, FingerprintKind::Intro)
@@ -132,7 +132,8 @@ fn empty_season_yields_empty_result() {
     };
     let result = detect_season(&season, &Config::default()).unwrap();
     assert!(result.markers.is_empty());
-    assert!(result.intro_reference.is_none());
+    assert!(result.intro_references.is_empty());
+    assert!(result.credits_references.is_empty());
 }
 
 #[test]

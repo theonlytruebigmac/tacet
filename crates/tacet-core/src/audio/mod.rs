@@ -1,10 +1,18 @@
 //! Audio decoding: media file → mono f32 PCM at target sample rate.
 //!
-//! Key design decisions vs Plex:
-//! - Uses symphonia (pure Rust) — no ffmpeg/transcoder dependency
-//! - Streaming decode: never buffers the entire file in memory
-//! - Only decodes the time windows we care about (first N / last N minutes)
-//! - Automatic resampling via rubato (high-quality sinc interpolation)
+//! Two decode paths:
+//! - **symphonia (default, pure Rust)**: handles FLAC, AAC-LC, MP3, Vorbis,
+//!   Opus, PCM-WAV, etc. Fast, no external process.
+//! - **ffmpeg subprocess (fallback)**: takes over when symphonia rejects a
+//!   file — HE-AAC, E-AC3/Atmos, AC-3, DTS, PCM-in-Matroska, exotic containers.
+//!   ffmpeg is invoked with stream args (`-f f32le pipe:1`) so we never write
+//!   intermediate files. If ffmpeg isn't on PATH the original symphonia error
+//!   propagates.
+//!
+//! Both paths produce the same [`AudioRegion`] shape so downstream code is
+//! oblivious to which one fired.
+
+pub mod ffmpeg;
 
 use anyhow::{Context, Result};
 use rubato::{Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction};
@@ -68,6 +76,50 @@ fn decode_region_internal(
     config: &Config,
     spec: RegionSpec,
 ) -> Result<AudioRegion> {
+    match decode_with_symphonia(path, config, spec) {
+        Ok(region) => Ok(region),
+        Err(symphonia_err) => {
+            if ffmpeg::is_available() {
+                tracing::debug!(
+                    path = %path.display(),
+                    symphonia_error = format!("{symphonia_err:#}"),
+                    "symphonia failed; falling back to ffmpeg"
+                );
+                decode_with_ffmpeg_fallback(path, config, spec).map_err(|ffmpeg_err| {
+                    symphonia_err.context(format!("ffmpeg fallback also failed: {ffmpeg_err:#}"))
+                })
+            } else {
+                Err(symphonia_err.context(
+                    "ffmpeg fallback is unavailable (install ffmpeg to handle this codec)",
+                ))
+            }
+        }
+    }
+}
+
+fn decode_with_ffmpeg_fallback(
+    path: &Path,
+    config: &Config,
+    spec: RegionSpec,
+) -> Result<AudioRegion> {
+    let (start, end) = match spec {
+        RegionSpec::Intro => (0.0, Some(config.intro_scan_minutes as f64 * 60.0)),
+        RegionSpec::Credits => {
+            let duration = ffmpeg::probe_duration(path)
+                .context("ffmpeg fallback: cannot probe duration for credits window")?;
+            let start = (duration - config.credits_scan_minutes as f64 * 60.0).max(0.0);
+            (start, Some(duration))
+        }
+        RegionSpec::Absolute { start_secs, end_secs } => (start_secs, Some(end_secs)),
+    };
+    ffmpeg::decode_region(path, config, start, end)
+}
+
+fn decode_with_symphonia(
+    path: &Path,
+    config: &Config,
+    spec: RegionSpec,
+) -> Result<AudioRegion> {
     let file = File::open(path).context("Failed to open media file")?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
 
@@ -90,10 +142,7 @@ fn decode_region_internal(
     let track_id = track.id;
     let native_rate = track.codec_params.sample_rate.unwrap_or(44100);
     let channels = track.codec_params.channels.map(|c| c.count()).unwrap_or(2);
-    let total_duration = track
-        .codec_params
-        .n_frames
-        .map(|n| n as f64 / native_rate as f64);
+    let total_duration = track_duration_seconds(track, native_rate);
 
     let (start_secs, end_secs) = match spec {
         RegionSpec::Intro => (0.0, config.intro_scan_minutes as f64 * 60.0),
@@ -170,6 +219,20 @@ fn decode_region_internal(
         offset_seconds: start_secs,
         total_duration,
     })
+}
+
+/// Compute total duration in seconds for a symphonia track.
+///
+/// `n_frames` is documented as the number of audio frames (one frame per sample
+/// for all channels) but some demuxers (notably Matroska) populate it in
+/// time-base units instead. Always prefer `n_frames * time_base` when both are
+/// available; fall back to `n_frames / sample_rate` otherwise.
+fn track_duration_seconds(track: &symphonia::core::formats::Track, native_rate: u32) -> Option<f64> {
+    let n = track.codec_params.n_frames?;
+    if let Some(tb) = track.codec_params.time_base {
+        return Some(n as f64 * tb.numer as f64 / tb.denom as f64);
+    }
+    Some(n as f64 / native_rate as f64)
 }
 
 /// Downmix interleaved multi-channel audio to mono by averaging channels.

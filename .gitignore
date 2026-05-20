@@ -3,3 +3,9 @@
 Cargo.lock.bak
 .DS_Store
 /mnt/user-data/
+
+# Local test media and per-run data cache (used for manual troubleshooting)
+/tests/.tacet-data/
+/tests/Golden Time/
+/tests/Silo/
+/tests/#Alive*/

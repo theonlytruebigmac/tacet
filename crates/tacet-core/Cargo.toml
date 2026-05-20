@@ -1,0 +1,55 @@
+[package]
+name = "tacet-core"
+description = "Ultra-fast audio fingerprinting + blackframe credits detection — library API"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "tacet"
+path = "src/lib.rs"
+
+[features]
+# `default` keeps the library light. Consumers like media servers that
+# bring their own SQLite + HTTP layer should depend on tacet-core with
+# default-features = false.
+default = []
+# Enable the bundled SQLite + bincode persistence layer
+# (`tacet::storage::Store`). Pulls in rusqlite + bincode.
+store = ["dep:rusqlite", "dep:bincode"]
+
+[dependencies]
+# === Audio decoding (pure Rust, no ffmpeg dependency on the fast path) ===
+symphonia = { version = "0.5", features = ["all"] }
+rubato = "0.15"                    # high-quality resampling
+
+# === DSP / Fingerprinting ===
+rustfft = "6.2"                    # FFT engine (auto-selects AVX2/NEON)
+num-complex = "0.4"
+
+# === Parallelism (CPU-bound; callers in async contexts use spawn_blocking) ===
+rayon = "1.10"
+
+# === Storage (feature-gated) ===
+rusqlite = { version = "0.31", features = ["bundled"], optional = true }
+bincode  = { version = "1.3", optional = true }
+
+# === Serde for hashes/refs (used by ffmpeg fallback + serialization) ===
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# === Utilities ===
+tracing = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+tempfile = "3"
+# Storage is needed for the integration tests that exercise the SQLite path.
+tacet-core = { path = ".", features = ["store"] }
+
+[[bench]]
+name = "fingerprint_bench"
+harness = false

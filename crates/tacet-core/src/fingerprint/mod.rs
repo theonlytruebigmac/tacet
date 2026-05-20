@@ -14,6 +14,15 @@ pub mod peaks;
 
 pub use constellation::Fingerprint;
 
+/// Which window of an episode a fingerprint covers — intro (head) or credits
+/// (tail). Used by detection routing and (when the `store` feature is on)
+/// the on-disk file naming.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum FingerprintKind {
+    Intro,
+    Credits,
+}
+
 /// A single fingerprint hash anchored at a specific frame in the source audio.
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct FpHash {

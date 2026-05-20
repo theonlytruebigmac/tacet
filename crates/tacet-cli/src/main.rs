@@ -1,10 +1,12 @@
+mod cli;
+
 use anyhow::Result;
 use clap::Parser;
-use tacet::cli::{Cli, Command, OutputFormat};
+use cli::{Cli, Command, OutputFormat};
 use tacet::detection::{self, EpisodeFile, Season};
 use tacet::storage::Store;
 use tacet::Config;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tracing::info;
 
 #[tokio::main]
@@ -83,16 +85,16 @@ async fn main() -> Result<()> {
                 .to_string_lossy()
                 .to_string();
 
-            let intro_ref =
-                store.load_reference(&series, season, tacet::storage::FingerprintKind::Intro)?;
-            let credits_ref =
-                store.load_reference(&series, season, tacet::storage::FingerprintKind::Credits)?;
+            let intro_refs =
+                store.load_references(&series, season, tacet::storage::FingerprintKind::Intro)?;
+            let credits_refs =
+                store.load_references(&series, season, tacet::storage::FingerprintKind::Credits)?;
 
             let markers = detection::detect_single_episode(
                 &file,
                 &episode_id,
-                intro_ref.as_ref(),
-                credits_ref.as_ref(),
+                &intro_refs,
+                &credits_refs,
                 &config,
             )?;
 
@@ -105,9 +107,9 @@ async fn main() -> Result<()> {
             let store = Store::open(data_path)?;
             let config = Config::default();
 
-            let state = std::sync::Arc::new(tacet::api::AppState { store, config });
+            let state = std::sync::Arc::new(tacet_api::AppState { store, config });
 
-            let app = tacet::api::router(state);
+            let app = tacet_api::router(state);
             let listener = tokio::net::TcpListener::bind(&listen).await?;
             info!("Listening on {listen}");
             axum::serve(listener, app).await?;
@@ -177,25 +179,113 @@ async fn main() -> Result<()> {
 }
 
 fn discover_episodes(dir: &Path, series_id: &str, season: u32) -> Result<Vec<EpisodeFile>> {
-    let mut episodes: Vec<EpisodeFile> = std::fs::read_dir(dir)?
+    let media_paths: Vec<PathBuf> = std::fs::read_dir(dir)?
         .filter_map(|entry| entry.ok())
-        .filter(|entry| {
-            let path = entry.path();
+        .map(|entry| entry.path())
+        .filter(|path| {
             matches!(
                 path.extension().and_then(|e| e.to_str()),
                 Some("mkv" | "mp4" | "avi" | "m4v" | "ts" | "flac" | "mp3" | "ogg" | "wav")
             )
         })
-        .enumerate()
-        .map(|(i, entry)| EpisodeFile {
-            id: format!("{series_id}-s{season:02}e{:02}", i + 1),
-            path: entry.path(),
-            episode_number: (i + 1) as u32,
+        .collect();
+
+    // Parse the SxxExx pattern from each filename so episode numbers and IDs
+    // line up with reality, even when the directory has gaps (missing E05, E11..)
+    // or when the filesystem returns entries out of alphabetical order.
+    let mut parsed: Vec<(Option<u32>, PathBuf)> = media_paths
+        .into_iter()
+        .map(|p| {
+            let name = p.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            (parse_episode_number(name, season), p)
         })
         .collect();
 
-    episodes.sort_by(|a, b| a.path.cmp(&b.path));
+    parsed.sort_by(|a, b| match (a.0, b.0) {
+        (Some(ax), Some(bx)) => ax.cmp(&bx),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => a.1.cmp(&b.1),
+    });
+
+    let episodes = parsed
+        .into_iter()
+        .enumerate()
+        .map(|(i, (ep_num, path))| {
+            let number = ep_num.unwrap_or((i + 1) as u32);
+            EpisodeFile {
+                id: format!("{series_id}-s{season:02}e{number:02}"),
+                path,
+                episode_number: number,
+            }
+        })
+        .collect();
+
     Ok(episodes)
+}
+
+/// Extract the episode number from a filename containing `S##E##` or `s##e##`.
+///
+/// If a season number is given, only matches whose season component equals it
+/// are accepted; this avoids `S02E01` getting picked up during a Season 1 scan
+/// of a mixed directory.
+fn parse_episode_number(stem: &str, expected_season: u32) -> Option<u32> {
+    let bytes = stem.as_bytes();
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        if (bytes[i] == b'S' || bytes[i] == b's') && bytes[i + 1].is_ascii_digit() {
+            let (season, after_season) = read_uint(bytes, i + 1)?;
+            if after_season < bytes.len()
+                && (bytes[after_season] == b'E' || bytes[after_season] == b'e')
+                && after_season + 1 < bytes.len()
+                && bytes[after_season + 1].is_ascii_digit()
+            {
+                let (episode, _) = read_uint(bytes, after_season + 1)?;
+                if season == expected_season {
+                    return Some(episode);
+                }
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+fn read_uint(bytes: &[u8], start: usize) -> Option<(u32, usize)> {
+    let mut end = start;
+    while end < bytes.len() && bytes[end].is_ascii_digit() {
+        end += 1;
+    }
+    if end == start {
+        return None;
+    }
+    let s = std::str::from_utf8(&bytes[start..end]).ok()?;
+    let n: u32 = s.parse().ok()?;
+    Some((n, end))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_episode_number_matches_common_formats() {
+        assert_eq!(parse_episode_number("Golden Time - S01E07 - Masquerade", 1), Some(7));
+        assert_eq!(parse_episode_number("show.s01e07.title", 1), Some(7));
+        assert_eq!(parse_episode_number("Show - S2E12 - Foo", 2), Some(12));
+    }
+
+    #[test]
+    fn parse_episode_number_rejects_wrong_season() {
+        // S02E01 must not match a Season 1 scan.
+        assert_eq!(parse_episode_number("Show - S02E01 - Foo", 1), None);
+    }
+
+    #[test]
+    fn parse_episode_number_returns_none_for_no_match() {
+        assert_eq!(parse_episode_number("random video clip", 1), None);
+        assert_eq!(parse_episode_number("Episode 7 of something", 1), None);
+    }
 }
 
 fn print_marker(m: &tacet::SegmentMarkers) {

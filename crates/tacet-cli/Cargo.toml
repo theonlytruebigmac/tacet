@@ -1,0 +1,34 @@
+[package]
+name = "tacet-cli"
+description = "Command-line frontend for tacet (scan / detect / serve / bench)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "tacet"
+path = "src/main.rs"
+
+[features]
+default = ["api"]
+# The `serve` subcommand is gated on this — building without `api` removes
+# axum + tower-http from the dependency tree.
+api = ["dep:tacet-api", "dep:axum"]
+
+[dependencies]
+tacet-core = { workspace = true, features = ["store"] }
+tacet-api  = { workspace = true, optional = true }
+
+axum = { version = "0.7", optional = true }
+clap = { version = "4", features = ["derive"] }
+rayon = "1.10"
+shellexpand = "3"
+tokio = { version = "1", features = ["full"] }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
