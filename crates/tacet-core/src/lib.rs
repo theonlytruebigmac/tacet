@@ -104,6 +104,26 @@ pub struct Config {
     /// Luma threshold used by ffmpeg `blackdetect`. Lower = stricter
     /// (only near-pure black qualifies). 0.10 catches dim fade-to-blacks.
     pub blackframe_pix_threshold: f32,
+    /// Optional ffmpeg `-hwaccel` value to pass for the blackframe decode.
+    ///
+    /// Defaults to `None` (software decode). Set to `Some("auto")` to let
+    /// ffmpeg pick an accelerator — useful for **single-file** workflows
+    /// (a media server's per-job detection worker) where the GPU is idle
+    /// and a 7× CPU reduction frees cores for other work like transcoding.
+    ///
+    /// Do **not** enable this for **batch / parallel** workflows (e.g. the
+    /// `tacet scan` CLI fingerprinting a whole season at once): 10+ parallel
+    /// blackframe calls serialize on the GPU's 1-4 decoder slots and total
+    /// wall time goes *up* even as per-call CPU goes down.
+    ///
+    /// On failure or timeout (broken VAAPI drivers can hang for many
+    /// minutes), detection retries automatically with software decode.
+    pub blackframe_hwaccel: Option<String>,
+    /// Wall-clock deadline (seconds) for the blackframe ffmpeg invocation.
+    /// Some hardware accelerators (e.g. a broken VAAPI driver) silently
+    /// hang for many minutes; this watchdog kills the child and falls back
+    /// to software decode.
+    pub blackframe_timeout_seconds: u64,
     /// Minimum matching hash ratio (fraction of *reference* hashes voting at
     /// the dominant alignment) required to accept a match.
     pub match_threshold: f64,
@@ -120,7 +140,12 @@ impl Default for Config {
             fft_size: 4096,
             hop_size: 2048,
             num_bands: 6,
-            intro_scan_minutes: 10.0,
+            // 18 min default catches even the long-tail "abnormal cold open"
+            // case — measured: Silo S01E05's intro starts at 14:28 and runs
+            // ~90s, so a 15-min window only catches the head of the intro
+            // music (often not enough hash overlap to match). 18 min covers
+            // it without significantly bloating decode work for normal shows.
+            intro_scan_minutes: 18.0,
             credits_scan_minutes: 8.0,
             min_segment_seconds: 5.0,
             min_credits_seconds: 30.0,
@@ -130,6 +155,10 @@ impl Default for Config {
             blackframe_fps: 2.0,
             blackframe_min_seconds: 3.0,
             blackframe_pix_threshold: 0.10,
+            // Default off — see field-level docs for why this isn't `Some("auto")`.
+            // Media servers running per-file detection should flip this on.
+            blackframe_hwaccel: None,
+            blackframe_timeout_seconds: 60,
             match_threshold: 0.08,
             fan_out: 5,
             max_target_delta: 50,

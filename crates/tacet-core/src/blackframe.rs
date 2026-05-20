@@ -16,6 +16,7 @@ use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use crate::audio::ffmpeg as ffmpeg_helper;
 
@@ -27,34 +28,54 @@ pub struct BlackSegment {
     pub duration: f64,
 }
 
-/// Scan the last `scan_seconds` of `path` for black frames using ffmpeg.
+/// Bag of knobs for a blackframe scan. Kept as a struct so the signature
+/// doesn't grow positional-arg by positional-arg every time we add a flag.
+#[derive(Debug, Clone)]
+pub struct ScanOptions {
+    pub scan_seconds: f64,
+    pub min_black_seconds: f64,
+    pub pix_threshold: f64,
+    pub sample_fps: f64,
+    /// Optional ffmpeg `-hwaccel` value (e.g. "auto", "cuda"). `None` forces
+    /// software decode; on broken systems set this to `None` if `"auto"` hangs.
+    pub hwaccel: Option<String>,
+    /// Wall-clock deadline for the ffmpeg invocation. On timeout we kill the
+    /// child and return an error so the caller can fall back to software.
+    pub timeout: Duration,
+}
+
+/// Scan the last `opts.scan_seconds` of `path` for black frames using ffmpeg.
 ///
 /// Returns segments in chronological order, with absolute timestamps relative
 /// to the file's start (not the seek offset).
 pub fn scan_tail(
     path: &Path,
-    scan_seconds: f64,
     total_duration: f64,
-    min_black_seconds: f64,
-    pix_threshold: f64,
-    sample_fps: f64,
+    opts: &ScanOptions,
 ) -> Result<Vec<BlackSegment>> {
     if !ffmpeg_helper::is_available() {
         return Err(anyhow!("ffmpeg not found on PATH"));
     }
-    let start_secs = (total_duration - scan_seconds).max(0.0);
+    let start_secs = (total_duration - opts.scan_seconds).max(0.0);
 
-    // Sub-sample the video (`fps=N`) and downscale aggressively (160x90) before
-    // blackdetect. Credits transitions are seconds long, so 4 fps is more than
-    // enough to find them — and the decode is ~6x cheaper than full-rate.
+    // Sub-sample the video (`fps=N`) and downscale aggressively (160x90)
+    // before blackdetect. Credits transitions are seconds long, so 2 fps is
+    // plenty to find them and ~12x cheaper than decoding at full rate.
     let vf = format!(
-        "fps={sample_fps},scale=160:90,blackdetect=d={min_black_seconds}:pix_th={pix_threshold}"
+        "fps={fps},scale=160:90,blackdetect=d={d}:pix_th={pix}",
+        fps = opts.sample_fps,
+        d = opts.min_black_seconds,
+        pix = opts.pix_threshold,
     );
 
-    let mut child = Command::new("ffmpeg")
-        .arg("-nostdin")
-        .arg("-loglevel")
-        .arg("info")
+    let mut cmd = Command::new("ffmpeg");
+    cmd.arg("-nostdin").arg("-loglevel").arg("info");
+    if let Some(h) = &opts.hwaccel {
+        // `-hwaccel <name>` must precede `-i`. ffmpeg's `auto` value falls
+        // back to software automatically if no accelerator initialises.
+        cmd.arg("-hwaccel").arg(h);
+    }
+    let mut child = cmd
         .arg("-ss")
         .arg(format!("{start_secs}"))
         .arg("-i")
@@ -79,7 +100,27 @@ pub fn scan_tail(
         buf
     });
 
-    let status = child.wait().context("waiting on ffmpeg blackdetect")?;
+    // Wall-clock watchdog. Some hwaccels (notably broken VAAPI on this
+    // machine) silently hang for minutes; without a timeout, one bad file
+    // would block the whole detection pass.
+    let start = Instant::now();
+    let status = loop {
+        match child.try_wait().context("polling ffmpeg blackdetect")? {
+            Some(s) => break s,
+            None => {
+                if start.elapsed() >= opts.timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = stderr_handle.join();
+                    return Err(anyhow!(
+                        "ffmpeg blackdetect exceeded {:?} timeout; killed",
+                        opts.timeout,
+                    ));
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+        }
+    };
     let log = stderr_handle.join().unwrap_or_default();
 
     if !status.success() {

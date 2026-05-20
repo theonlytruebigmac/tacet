@@ -416,17 +416,38 @@ fn credits_blackframe_fallback(
         return None;
     }
     let total = credits_window?.region.total_duration?;
-    let scan_seconds = config.blackframe_scan_minutes as f64 * 60.0;
 
-    let segments = match blackframe::scan_tail(
-        path,
-        scan_seconds,
-        total,
-        config.blackframe_min_seconds as f64,
-        config.blackframe_pix_threshold as f64,
-        config.blackframe_fps as f64,
-    ) {
+    let mut opts = blackframe::ScanOptions {
+        scan_seconds: config.blackframe_scan_minutes as f64 * 60.0,
+        min_black_seconds: config.blackframe_min_seconds as f64,
+        pix_threshold: config.blackframe_pix_threshold as f64,
+        sample_fps: config.blackframe_fps as f64,
+        hwaccel: config.blackframe_hwaccel.clone(),
+        timeout: std::time::Duration::from_secs(config.blackframe_timeout_seconds),
+    };
+
+    let segments = match blackframe::scan_tail(path, total, &opts) {
         Ok(s) => s,
+        Err(e) if opts.hwaccel.is_some() => {
+            // Broken / hanging hwaccel (the VAAPI 8-minute hang is the
+            // motivating case). Retry once with software decode before
+            // giving up on this episode.
+            debug!(
+                error = format!("{e:#}"),
+                "blackframe hwaccel scan failed; retrying with software decode",
+            );
+            opts.hwaccel = None;
+            match blackframe::scan_tail(path, total, &opts) {
+                Ok(s) => s,
+                Err(e2) => {
+                    debug!(
+                        error = format!("{e2:#}"),
+                        "blackframe software fallback also failed; skipping",
+                    );
+                    return None;
+                }
+            }
+        }
         Err(e) => {
             debug!(error = format!("{e:#}"), "blackframe scan failed; skipping fallback");
             return None;

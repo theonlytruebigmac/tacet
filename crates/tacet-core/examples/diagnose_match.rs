@@ -20,8 +20,16 @@ fn main() -> anyhow::Result<()> {
         std::process::exit(2);
     }
 
-    let config = Config::default();
-    println!("config: threshold={} min_seg={}s frame_dur={}s",
+    let scan_min: f32 = std::env::var("INTRO_SCAN_MINUTES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(10.0);
+    let config = Config {
+        intro_scan_minutes: scan_min,
+        ..Config::default()
+    };
+    println!("config: intro_scan_minutes={} threshold={} min_seg={}s frame_dur={}s",
+        scan_min,
         config.match_threshold,
         config.min_segment_seconds,
         config.hop_size as f64 / config.sample_rate as f64,

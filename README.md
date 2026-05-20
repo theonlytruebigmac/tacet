@@ -186,21 +186,38 @@ Config {
     fft_size: 4096,              // Frequency resolution
     hop_size: 2048,              // ~128ms per frame at 16kHz
     num_bands: 6,                // Spectral bands for peak picking
-    intro_scan_minutes: 10.0,    // How far into episode to scan
+    intro_scan_minutes: 18.0,    // How far into episode to scan (catches long cold opens)
     credits_scan_minutes: 8.0,   // How far from end to scan
     min_segment_seconds: 5.0,    // Minimum reportable segment (Plex: 20s)
     min_credits_seconds: 30.0,   // Credits-specific floor (rejects short stings)
     max_credits_tail_gap: 30.0,  // Credits must end within N s of file end
-    blackframe_fallback: true,   // Enable blackdetect-based credits fallback
+    blackframe_fallback: true,        // Enable blackdetect-based credits fallback
     blackframe_scan_minutes: 3.0,
-    blackframe_fps: 2.0,         // Frame sampling for blackdetect (faster)
-    blackframe_min_seconds: 3.0, // Min consecutive black to count
+    blackframe_fps: 2.0,              // Frame sampling for blackdetect (faster)
+    blackframe_min_seconds: 3.0,      // Min consecutive black to count
     blackframe_pix_threshold: 0.10,
+    blackframe_hwaccel: None,         // Some("auto") for serial workflows (see below)
+    blackframe_timeout_seconds: 60,   // Watchdog — kills hung hwaccel decodes
     match_threshold: 0.08,       // Fraction of reference hashes voting
     fan_out: 5,                  // Peaks paired per anchor
     max_target_delta: 50,        // Max frame gap for pairing
 }
 ```
+
+### Hardware acceleration for the blackframe pass
+
+`blackframe_hwaccel` defaults to `None` (software decode). Counter-intuitively, this is the right default for **batch / parallel** workflows like `tacet scan` — 10+ episodes processed in parallel saturate all CPU cores efficiently, but serialize on the GPU's 1–4 decoder slots when hwaccel is on. We measured **30% slower** wall time with `hwaccel=auto` on a 10-episode Silo scan vs software.
+
+For **serial / per-file** workflows (a media server's discovery-pipeline worker that runs detection on one file at a time), turn it on:
+
+```rust
+Config {
+    blackframe_hwaccel: Some("auto".to_string()), // or "cuda", "vaapi", "qsv", "videotoolbox", …
+    ..Config::default()
+}
+```
+
+Per-call wall time drops modestly (3.2s → 2.8s on our test bench) and CPU usage drops ~7×, freeing cores for transcoding or other work. If the chosen accelerator hangs (broken VAAPI driver is the canonical case — we saw an 8-minute hang in the wild), the watchdog kills the child after `blackframe_timeout_seconds` and retries with software automatically.
 
 ## License
 
